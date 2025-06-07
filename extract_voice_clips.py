@@ -2,9 +2,11 @@ import os
 import subprocess
 from pathlib import Path
 import torch
-from silero_vad import get_speech_timestamps, save_audio, read_audio
-from typing import List
+from silero_vad import read_audio
+from typing import List, Tuple
 import shutil
+import datetime
+from datetime import timedelta
 
 def summarize_text(transcript_file: Path) -> str:
     """Use Ollama (gemma3:4b) to summarize transcript into a 2–4 word title."""
@@ -47,6 +49,77 @@ def summarize_text(transcript_file: Path) -> str:
         print(f"Error summarizing transcript: {e}")
         return transcript_file.stem
 
+
+# --- NEW FUNCTION: correct_transcript ---
+def correct_transcript(transcript_file: Path) -> None:
+    """Use Ollama (gemma3:4b) to correct transcription errors in a transcript file."""
+    # Read the raw transcript
+    with open(transcript_file, 'r') as f:
+        content = f.read()
+    try:
+        # Build the correction prompt
+        prompt = (
+            "You are a transcription corrector. "
+            "Correct any spelling, grammar, or misheard words in the following transcript. "
+            "Restore grammar and sentence structure. "
+            "Use context to infer likely words or phrases. Replace any obviously wrong words. "
+            "Return only the corrected text with no additional commentary:\n\n"
+            f"{content}"
+        )
+        # Call Ollama to correct the transcript
+        result = subprocess.run(
+            ["ollama", "run", "gemma3:4b", prompt],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        corrected = result.stdout.strip()
+        # Overwrite the transcript file with corrected text
+        with open(transcript_file, 'w') as f:
+            f.write(corrected)
+        print(f"[DEBUG] Transcript corrected for {transcript_file.name}")
+    except subprocess.CalledProcessError as e:
+        print(f"Error correcting transcript: {e}")
+
+def compute_time_score(video_path: Path, start_sec: float) -> float:
+    """Return 1.0 if the clip time (video creation time plus offset) is between midnight and 6am, else 0.1."""
+    try:
+        # Get original video creation time
+        ctime = os.path.getctime(video_path)
+        dt0 = datetime.datetime.fromtimestamp(ctime)
+        # Compute actual clip timestamp by offsetting creation time
+        dt_clip = dt0 + timedelta(seconds=start_sec)
+        if 0 <= dt_clip.hour < 6:
+            return 1.0
+    except Exception as e:
+        print(f"[DEBUG] Time scoring error for {video_path.name} at offset {start_sec}: {e}")
+    return 0.1
+
+def classify_sleep_talk(transcript_file: Path) -> float:
+    """Use Ollama to rate likelihood (0 to 1) that transcript is sleep talking."""
+    with open(transcript_file, 'r') as f:
+        content = f.read()
+    prompt = (
+        "Rate how likely this transcript is from someone talking in their sleep. "
+        "Use incoherence or [inaudible] markers as cues. "
+        "A shorter transcript is more likely to be sleep talking. "
+        "Respond with only a number between 0 and 1 "
+        "Do not respond with any other text or reasoning. Only a single number between 0 and 1\n\n"
+        f"{content}"
+    )
+    try:
+        result = subprocess.run(
+            ["ollama", "run", "gemma3:4b", prompt],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        score = float(result.stdout.strip())
+        return max(0.0, min(1.0, score))
+    except Exception as e:
+        print(f"[DEBUG] Sleep-talk classification error for {transcript_file.name}: {e}")
+        return 0.0
+
 # Path to the Whisper.cpp executable (adjust as needed)
 WHISPER_BIN = Path("/usr/local/bin/whisper-cli")
 # Path to the Whisper.cpp model file (adjust as needed)
@@ -59,6 +132,8 @@ def extract_audio(video_path: Path, audio_path: Path) -> None:
         [
             "ffmpeg",
             "-y",
+            "-hide_banner",
+            "-loglevel", "error",
             "-err_detect", "ignore_err",
             "-fflags", "+discardcorrupt",
             "-i", str(video_path),
@@ -104,10 +179,10 @@ def merge_segments(speech_timestamps: List[dict], gap_seconds: float = 2.0) -> L
     print(f"Merged into {len(merged)} segments.")
     return merged
 
-def extract_clips(video_path: Path, merged_timestamps: List[dict], output_dir: Path) -> List[Path]:
-    """Extract video clips for each merged speech segment and return list of clip paths."""
+def extract_clips(video_path: Path, merged_timestamps: List[dict], output_dir: Path) -> List[Tuple[Path, float]]:
+    """Extract video clips for each merged speech segment and return list of clip paths and start times."""
     print("Stage 4: Extracting individual voice clips...")
-    clip_paths: List[Path] = []
+    clip_info: List[Tuple[Path, float]] = []
     for i, ts in enumerate(merged_timestamps):
         start_sec = max(0, ts["start"] / 16000 - 1)
         duration_sec = (ts["end"] - ts["start"]) / 16000 + 2
@@ -116,6 +191,7 @@ def extract_clips(video_path: Path, merged_timestamps: List[dict], output_dir: P
             [
                 "ffmpeg",
                 "-y",
+                "-hide_banner",
                 "-loglevel", "error",
                 "-ss", str(start_sec),
                 "-i", str(video_path),
@@ -128,9 +204,9 @@ def extract_clips(video_path: Path, merged_timestamps: List[dict], output_dir: P
                 str(clip_file),
             ]
         )
-        clip_paths.append(clip_file)
-    print(f"Extracted {len(clip_paths)} voice clips to {output_dir}")
-    return clip_paths
+        clip_info.append((clip_file, start_sec))
+    print(f"Extracted {len(clip_info)} voice clips to {output_dir}")
+    return clip_info
 
 def transcribe_clip(clip_path: Path) -> None:
     """Transcribe a single video clip using Whisper.cpp and save to a .txt file."""
@@ -141,6 +217,8 @@ def transcribe_clip(clip_path: Path) -> None:
         [
             "ffmpeg",
             "-y",
+            "-hide_banner",
+            "-loglevel", "error",
             "-i",
             str(clip_path),
             "-ar",
@@ -162,6 +240,7 @@ def transcribe_clip(clip_path: Path) -> None:
                 str(audio_clip),
             ],
             stdout=tf,
+            stderr=subprocess.DEVNULL
         )
     # Cleanup WAV file
     if audio_clip.exists():
@@ -174,7 +253,7 @@ def cleanup_temp(audio_path: Path) -> None:
         audio_path.unlink()
         print("Temporary audio file removed.")
 
-def process_video(video_path: Path) -> None:
+def process_video(video_path: Path) -> List[Tuple[Path, float]]:
     """Orchestrate the entire processing pipeline for a single video."""
     print(f"\n=== Processing {video_path.name} ===")
     output_dir = video_path.parent / "voice_clips"
@@ -185,12 +264,21 @@ def process_video(video_path: Path) -> None:
     audio_tensor = load_audio(audio_path)
     speech_timestamps = run_vad(audio_tensor)
     merged_timestamps = merge_segments(speech_timestamps)
-    clip_files = extract_clips(video_path, merged_timestamps, output_dir)
+    clip_items = extract_clips(video_path, merged_timestamps, output_dir)
 
-    # Transcribe, summarize, and rename each extracted clip
-    for clip in clip_files:
+    # Prepare list to collect ranking scores
+    rankings: List[Tuple[Path, float]] = []
+
+    # Transcribe, correct, summarize, and rename each extracted clip
+    for clip, start_sec in clip_items:
         transcribe_clip(clip)
         transcript_file = clip.with_suffix(".txt")
+        # Correct any transcription errors before summarization
+        correct_transcript(transcript_file)
+        # Compute sleep-talk likelihood heuristics
+        coherence = classify_sleep_talk(transcript_file)
+        time_score = compute_time_score(video_path, start_sec)
+        final_score = coherence * time_score  # simple multiple of both heuristics
         # Generate a concise title using Ollama
         summary = summarize_text(transcript_file)
         print(f"[DEBUG] Renaming to: clip='{summary}{clip.suffix}', transcript='{summary}.txt'")
@@ -200,8 +288,31 @@ def process_video(video_path: Path) -> None:
         # Rename the clip and transcript files to the summary-based names
         clip.rename(new_clip)
         transcript_file.rename(new_txt)
+        # Record this clip's score for ranking
+        rankings.append((new_clip, final_score))
 
     cleanup_temp(audio_path)
+    # Return rankings for this video
+    return rankings
+
+def rank_clips_across(voice_clips_dir: Path, rankings: List[Tuple[Path, float]]) -> None:
+    """Rank and prefix clips across all videos in a folder."""
+    if rankings:
+        # Sort clips by descending score
+        rankings.sort(key=lambda x: x[1], reverse=True)
+        for idx, (clip_path, score) in enumerate(rankings, start=1):
+            # Original transcript path before renaming
+            original_transcript = clip_path.with_suffix('.txt')
+            # Rename clip with rank prefix
+            ranked_clip = clip_path.with_name(f"{idx}_{clip_path.name}")
+            clip_path.rename(ranked_clip)
+            # Rename transcript with rank prefix
+            ranked_transcript = ranked_clip.with_suffix('.txt')
+            if original_transcript.exists():
+                original_transcript.rename(ranked_transcript)
+            else:
+                print(f"[DEBUG] Transcript file not found for ranking: {original_transcript}")
+            print(f"{idx}. {ranked_clip.name} (score: {score:.2f})")
 
 def clean_output_folder(directory: Path) -> None:
     """Delete existing voice_clips folder if it exists."""
@@ -222,8 +333,12 @@ def main() -> None:
                 continue
             print(f"\n--- Entering directory: {subdir.name} ---")
             clean_output_folder(subdir)
+            all_rankings: List[Tuple[Path, float]] = []
             for file in sorted(subdir.glob("*.mp4")):
-                process_video(file)
+                video_rankings = process_video(file)
+                all_rankings.extend(video_rankings)
+            # Rank and prefix all clips across this folder
+            rank_clips_across(subdir / "voice_clips", all_rankings)
             # Mark this folder as processed
             processed_marker.touch()
             print(f"Marked folder as processed: {subdir.name}")
