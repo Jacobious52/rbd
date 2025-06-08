@@ -263,7 +263,7 @@ def process_video(video_path: Path) -> List[Tuple[Path, float]]:
     extract_audio(video_path, audio_path)
     audio_tensor = load_audio(audio_path)
     speech_timestamps = run_vad(audio_tensor)
-    merged_timestamps = merge_segments(speech_timestamps)
+    merged_timestamps = merge_segments(speech_timestamps, 10.0)
     clip_items = extract_clips(video_path, merged_timestamps, output_dir)
 
     # Prepare list to collect ranking scores
@@ -301,15 +301,25 @@ def rank_clips_across(voice_clips_dir: Path, rankings: List[Tuple[Path, float]])
         # Sort clips by descending score
         rankings.sort(key=lambda x: x[1], reverse=True)
         for idx, (clip_path, score) in enumerate(rankings, start=1):
-            # Original transcript path before renaming
+            # Skip if the clip file no longer exists (e.g., duplicate names)
+            if not clip_path.exists():
+                print(f"[DEBUG] File not found for ranking: {clip_path}")
+                continue
             original_transcript = clip_path.with_suffix('.txt')
-            # Rename clip with rank prefix
             ranked_clip = clip_path.with_name(f"{idx}_{clip_path.name}")
-            clip_path.rename(ranked_clip)
+            # Rename clip with rank prefix
+            try:
+                clip_path.rename(ranked_clip)
+            except Exception as e:
+                print(f"[DEBUG] Error renaming {clip_path} to {ranked_clip}: {e}")
+                continue
             # Rename transcript with rank prefix
             ranked_transcript = ranked_clip.with_suffix('.txt')
             if original_transcript.exists():
-                original_transcript.rename(ranked_transcript)
+                try:
+                    original_transcript.rename(ranked_transcript)
+                except Exception as e:
+                    print(f"[DEBUG] Error renaming transcript {original_transcript} to {ranked_transcript}: {e}")
             else:
                 print(f"[DEBUG] Transcript file not found for ranking: {original_transcript}")
             print(f"{idx}. {ranked_clip.name} (score: {score:.2f})")
