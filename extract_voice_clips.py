@@ -208,90 +208,175 @@ def extract_clips(video_path: Path, merged_timestamps: List[dict], output_dir: P
     print(f"Extracted {len(clip_info)} voice clips to {output_dir}")
     return clip_info
 
-def transcribe_clip(clip_path: Path) -> None:
-    """Transcribe a single video clip using Whisper.cpp and save to a .txt file."""
-    print(f"Transcribing {clip_path.name}...")
-    audio_clip = clip_path.with_suffix(".wav")
-    # Extract audio from clip
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-hide_banner",
-            "-loglevel", "error",
-            "-i",
-            str(clip_path),
-            "-ar",
-            "16000",
-            "-ac",
-            "1",
-            str(audio_clip),
-        ]
-    )
-    # Run Whisper.cpp and write output to .txt
-    transcript_file = clip_path.with_suffix(".txt")
-    with open(transcript_file, "w") as tf:
+def extract_thumbnail(video_path: Path, output_dir: Path, timestamp: str = "00:00:01") -> Path:
+    """Extract a thumbnail from the video using ffmpeg.
+    
+    Args:
+        video_path: Path to the video file
+        output_dir: Directory to save the thumbnail
+        timestamp: Timestamp in HH:MM:SS format to extract the thumbnail from
+        
+    Returns:
+        Path to the generated thumbnail
+    """
+    thumbnail_path = output_dir / f"{video_path.stem}.png"
+    try:
         subprocess.run(
             [
-                str(WHISPER_BIN),
-                "-m",
-                str(WHISPER_MODEL),
-                "-f",
-                str(audio_clip),
+                "ffmpeg",
+                "-i", str(video_path),
+                "-ss", timestamp,
+                "-vframes", "1",
+                "-vf", "scale=320:-1",  # Scale width to 320px, maintain aspect ratio
+                "-y",  # Overwrite output file if it exists
+                str(thumbnail_path)
             ],
-            stdout=tf,
-            stderr=subprocess.DEVNULL
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
         )
-    # Cleanup WAV file
-    if audio_clip.exists():
-        audio_clip.unlink()
-    print(f"Transcript saved to {transcript_file}")
+        return thumbnail_path
+    except subprocess.CalledProcessError as e:
+        print(f"Error extracting thumbnail from {video_path.name}: {e.stderr.decode() if e.stderr else str(e)}")
+        return None
 
-def cleanup_temp(audio_path: Path) -> None:
-    """Remove temporary audio file."""
-    if audio_path.exists():
-        audio_path.unlink()
-        print("Temporary audio file removed.")
+def transcribe_clip(clip_path: Path) -> Path:
+    """Transcribe a single video clip using Whisper.cpp and save to a .txt file."""
+    output_file = clip_path.with_suffix('.txt')
+    audio_clip = clip_path.with_suffix('.wav')
+    
+    try:
+        # Extract audio from clip
+        extract_audio(clip_path, audio_clip)
+        
+        # Run Whisper.cpp for transcription
+        with open(output_file, 'w') as f:
+            subprocess.run(
+                [str(WHISPER_BIN), '-m', str(WHISPER_MODEL), '-f', str(audio_clip)],
+                stdout=f,
+                stderr=subprocess.DEVNULL
+            )
+        
+        print(f"Transcript saved to {output_file}")
+        return output_file
+        
+    finally:
+        # Always clean up the temporary WAV file
+        if audio_clip.exists():
+            try:
+                audio_clip.unlink()
+            except Exception as e:
+                print(f"Warning: Could not remove temporary audio file {audio_clip}: {e}")
 
 def process_video(video_path: Path) -> List[Tuple[Path, float]]:
     """Orchestrate the entire processing pipeline for a single video."""
     print(f"\n=== Processing {video_path.name} ===")
     output_dir = video_path.parent / "voice_clips"
-    audio_path = output_dir / f"{video_path.stem}_audio.wav"
     os.makedirs(output_dir, exist_ok=True)
-
-    extract_audio(video_path, audio_path)
-    audio_tensor = load_audio(audio_path)
-    speech_timestamps = run_vad(audio_tensor)
-    merged_timestamps = merge_segments(speech_timestamps, 10.0)
-    clip_items = extract_clips(video_path, merged_timestamps, output_dir)
-
-    # Prepare list to collect ranking scores
-    rankings: List[Tuple[Path, float]] = []
-
-    # Transcribe, correct, summarize, and rename each extracted clip
-    for clip, start_sec in clip_items:
-        transcribe_clip(clip)
-        transcript_file = clip.with_suffix(".txt")
-        # Correct any transcription errors before summarization
-        correct_transcript(transcript_file)
-        # Compute sleep-talk likelihood heuristics
-        coherence = classify_sleep_talk(transcript_file)
-        time_score = compute_time_score(video_path, start_sec)
-        final_score = coherence * time_score  # simple multiple of both heuristics
-        # Generate a concise title using Ollama
-        summary = summarize_text(transcript_file)
-        print(f"[DEBUG] Renaming to: clip='{summary}{clip.suffix}', transcript='{summary}.txt'")
-        # Build new filenames using the summary text
-        new_clip = clip.with_name(f"{summary}{clip.suffix}")
-        new_txt = transcript_file.with_name(f"{summary}.txt")
-        # Rename the clip and transcript files to the summary-based names
-        clip.rename(new_clip)
-        transcript_file.rename(new_txt)
-        # Record this clip's score for ranking
-        rankings.append((new_clip, final_score))
-
-    cleanup_temp(audio_path)
+    
+    # Track all temporary files for cleanup
+    temp_files = []
+    audio_path = None
+    
+    try:
+        # Extract and process audio
+        audio_path = output_dir / f"{video_path.stem}_audio.wav"
+        temp_files.append(audio_path)
+        extract_audio(video_path, audio_path)
+        audio_tensor = load_audio(audio_path)
+        
+        # Run voice activity detection
+        speech_timestamps = run_vad(audio_tensor)
+        if not speech_timestamps:
+            print("No speech detected in the audio.")
+            return []
+        
+        # Merge nearby speech segments
+        merged_timestamps = merge_segments(speech_timestamps, 10.0)
+        
+        # Extract video clips
+        clip_items = extract_clips(video_path, merged_timestamps, output_dir)
+        
+        # Process each clip
+        rankings = []
+        for clip_path, start_sec in clip_items:
+            try:
+                # Track this clip's temporary files
+                clip_temp_files = [
+                    clip_path.with_suffix('.wav'),
+                    clip_path.with_suffix('.png')
+                ]
+                temp_files.extend(clip_temp_files)
+                
+                # Transcribe the clip first
+                transcript_path = transcribe_clip(clip_path)
+                if not transcript_path or not transcript_path.exists():
+                    continue
+                    
+                # Add transcript to temp files for cleanup
+                temp_files.append(transcript_path)
+                
+                # Correct the transcript
+                correct_transcript(transcript_path)
+                
+                # Generate a summary for the clip
+                summary = summarize_text(transcript_path)
+                
+                # Score the clip
+                time_score = compute_time_score(video_path, start_sec)
+                sleep_score = classify_sleep_talk(transcript_path)
+                final_score = time_score * sleep_score
+                
+                # Generate new base name for all files
+                new_base = output_dir / summary
+                
+                # Define new paths for all files
+                new_clip_path = new_base.with_suffix(clip_path.suffix)
+                new_transcript_path = new_base.with_suffix('.txt')
+                new_thumbnail_path = new_base.with_suffix('.png')
+                
+                # Extract thumbnail after we know the final filename
+                extract_thumbnail(clip_path, output_dir, "00:00:01")
+                
+                # Rename all files to use the summary
+                # First rename the thumbnail if it exists
+                thumbnail_path = clip_path.with_suffix('.png')
+                if thumbnail_path.exists():
+                    thumbnail_path.rename(new_thumbnail_path)
+                    # Remove from temp files since it's been renamed
+                    if thumbnail_path in temp_files:
+                        temp_files.remove(thumbnail_path)
+                
+                # Then rename the transcript and video
+                if transcript_path.exists():
+                    transcript_path.rename(new_transcript_path)
+                    if transcript_path in temp_files:
+                        temp_files.remove(transcript_path)
+                
+                if clip_path.exists():
+                    clip_path.rename(new_clip_path)
+                    if clip_path in temp_files:
+                        temp_files.remove(clip_path)
+                
+                # Add to rankings with the new path
+                rankings.append((new_clip_path, final_score))
+                
+            except Exception as e:
+                print(f"Error processing clip {clip_path.name}: {e}")
+                continue
+                
+    finally:
+        # Clean up all temporary files
+        for temp_file in temp_files:
+            if temp_file and temp_file.exists():
+                try:
+                    if temp_file.is_file():
+                        temp_file.unlink()
+                    elif temp_file.is_dir():
+                        shutil.rmtree(temp_file)
+                except Exception as e:
+                    print(f"Warning: Could not clean up {temp_file}: {e}")
+    
     # Return rankings for this video
     return rankings
 
@@ -305,14 +390,19 @@ def rank_clips_across(voice_clips_dir: Path, rankings: List[Tuple[Path, float]])
             if not clip_path.exists():
                 print(f"[DEBUG] File not found for ranking: {clip_path}")
                 continue
+            
+            # Prepare paths for all related files
             original_transcript = clip_path.with_suffix('.txt')
+            original_thumbnail = clip_path.with_suffix('.png')
             ranked_clip = clip_path.with_name(f"{idx}_{clip_path.name}")
+            
             # Rename clip with rank prefix
             try:
                 clip_path.rename(ranked_clip)
             except Exception as e:
                 print(f"[DEBUG] Error renaming {clip_path} to {ranked_clip}: {e}")
                 continue
+                
             # Rename transcript with rank prefix
             ranked_transcript = ranked_clip.with_suffix('.txt')
             if original_transcript.exists():
@@ -322,6 +412,15 @@ def rank_clips_across(voice_clips_dir: Path, rankings: List[Tuple[Path, float]])
                     print(f"[DEBUG] Error renaming transcript {original_transcript} to {ranked_transcript}: {e}")
             else:
                 print(f"[DEBUG] Transcript file not found for ranking: {original_transcript}")
+                
+            # Rename thumbnail with rank prefix if it exists
+            ranked_thumbnail = ranked_clip.with_suffix('.png')
+            if original_thumbnail.exists():
+                try:
+                    original_thumbnail.rename(ranked_thumbnail)
+                except Exception as e:
+                    print(f"[DEBUG] Error renaming thumbnail {original_thumbnail} to {ranked_thumbnail}: {e}")
+            
             print(f"{idx}. {ranked_clip.name} (score: {score:.2f})")
 
 def clean_output_folder(directory: Path) -> None:

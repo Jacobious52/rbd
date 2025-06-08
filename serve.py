@@ -6,7 +6,7 @@ from typing import List, Dict
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, FileResponse
 from fastapi import status
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -114,6 +114,39 @@ def get_folder_status() -> List[Dict[str, str]]:
             })
     return folders
 
+def get_voice_clips(folder_path: Path) -> List[Dict[str, str]]:
+    """Get list of voice clips in a folder's voice_clips subdirectory."""
+    clips = []
+    
+    if not folder_path.exists() or not folder_path.is_dir():
+        return clips
+    
+    # Look for voice_clips subdirectory
+    voice_clips_dir = folder_path / 'voice_clips'
+    if not voice_clips_dir.exists() or not voice_clips_dir.is_dir():
+        return clips
+        
+    # Look for video files in voice_clips directory
+    for video_file in voice_clips_dir.glob('*.mp4'):
+        # Look for corresponding text file
+        txt_file = video_file.with_suffix('.txt')
+        text_content = ""
+        
+        if txt_file.exists():
+            try:
+                with open(txt_file, 'r', encoding='utf-8') as f:
+                    text_content = f.read().strip()
+            except Exception as e:
+                print(f"Error reading {txt_file}: {e}")
+        
+        clips.append({
+            'video_path': str(video_file.relative_to(BASE_DIR)),
+            'title': video_file.stem,
+            'text': text_content
+        })
+    
+    return clips
+
 def run_extraction():
     """Run the voice extraction process and update status."""
     global current_status
@@ -196,23 +229,52 @@ async def trigger_extraction(request: Request):
         </div>
     """)
 
+@app.get("/folder/{folder_path:path}", response_class=HTMLResponse)
+async def folder_detail(request: Request, folder_path: str):
+    """Display details for a specific folder."""
+    try:
+        full_path = BASE_DIR / folder_path
+        if not full_path.exists() or not full_path.is_dir():
+            raise HTTPException(status_code=404, detail="Folder not found")
+            
+        clips = get_voice_clips(full_path)
+        return templates.TemplateResponse("folder_detail.html", {
+            "request": request,
+            "folder_name": full_path.name,
+            "folder_path": str(full_path.relative_to(BASE_DIR)),
+            "clips": clips
+        })
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error loading folder: {str(e)}")
+
 @app.get("/api/folders")
 async def list_folders(request: Request):
     """Get list of folders and their status."""
-    folders = get_folder_status()
-    
-    # Check if the request is from HTMX
-    if "hx-request" in request.headers:
-        # Return the complete table body structure
-        return templates.TemplateResponse(
-            "folder_rows.html",
-            {"request": request, "folders": folders},
-            headers={"HX-Retarget": "#folders-list", "HX-Reswap": "innerHTML"}
+    try:
+        folders = get_folder_status()
+        # Add URL to each folder
+        for folder in folders:
+            folder['url'] = f"/folder/{folder['path']}"
+        return templates.TemplateResponse("folder_rows.html", {"request": request, "folders": folders})
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Error listing folders: {str(e)}"}
         )
+
+# Serve static files from the base directory
+@app.get("/files/{file_path:path}")
+async def serve_file(file_path: str):
+    """Serve static files from the base directory."""
+    file_path = Path(file_path)
+    full_path = BASE_DIR / file_path
     
-    return folders
-
-
+    if not full_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    return FileResponse(full_path)
 
 if __name__ == "__main__":
     uvicorn.run(

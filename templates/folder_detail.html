@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Voice Clips - {{ folder_name }}</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <style>
+        .video-thumbnail {
+            position: relative;
+            cursor: pointer;
+            overflow: hidden;
+            transition: all 0.3s ease;
+        }
+        .video-thumbnail:hover {
+            transform: scale(1.02);
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+        }
+        .play-button {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 60px;
+            height: 60px;
+            background-color: rgba(255, 255, 255, 0.9);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            transition: all 0.2s ease;
+        }
+        .play-button:hover {
+            background-color: white;
+            transform: translate(-50%, -50%) scale(1.1);
+        }
+        .play-button::after {
+            content: '';
+            width: 0;
+            height: 0;
+            border-top: 12px solid transparent;
+            border-bottom: 12px solid transparent;
+            border-left: 20px solid #3b82f6;
+            margin-left: 4px;
+        }
+        .video-player {
+            display: none;
+            width: 100%;
+        }
+        .video-player.playing {
+            display: block;
+        }
+        .video-thumbnail-wrapper {
+            display: block;
+            width: 100%;
+            position: relative;
+        }
+        .video-thumbnail-wrapper.playing {
+            display: none;
+        }
+    </style>
+</head>
+<body class="bg-gray-100">
+    <div class="container mx-auto px-4 py-8">
+        <div class="mb-6">
+            <a href="/" class="text-blue-500 hover:underline flex items-center">
+                <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path>
+                </svg>
+                Back to Folders
+            </a>
+            <h1 class="text-3xl font-bold mt-2">{{ folder_name }}</h1>
+            <p class="text-gray-600">Path: {{ folder_path }}</p>
+        </div>
+
+        <div class="grid gap-6">
+            {% for clip in clips %}
+            <div class="bg-white rounded-lg shadow overflow-hidden">
+                <div class="p-4 border-b">
+                    <h2 class="text-xl font-semibold">{{ clip.title }}</h2>
+                </div>
+                <div class="md:flex">
+                    <div class="md:w-1/2 p-4">
+                        <!-- Video Thumbnail -->
+                        <div class="video-thumbnail-wrapper" id="thumbnail-{{ loop.index }}">
+                            <div class="video-thumbnail bg-gray-200 rounded-lg overflow-hidden relative" 
+                                 onclick="playVideo('{{ loop.index }}', '{{ clip.video_path }}')">
+                                {% set thumbnail_path = clip.video_path|replace('.mp4', '.png') %}
+                                <img src="/files/{{ thumbnail_path }}" 
+                                     class="w-full h-full object-cover"
+                                     style="min-height: 200px;"
+                                     alt="Video thumbnail"
+                                     onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
+                                <div class="play-button"></div>
+                            </div>
+                        </div>
+                        <!-- Video Player -->
+                        <video id="video-{{ loop.index }}" 
+                               class="video-player w-full rounded" 
+                               controls 
+                               preload="none"
+                               onended="videoEnded('{{ loop.index }}')">
+                            Your browser does not support the video tag.
+                        </video>
+                    </div>
+                    <div class="md:w-1/2 p-4 bg-gray-50">
+                        <h3 class="font-medium text-gray-700 mb-2">Transcription:</h3>
+                        <div class="whitespace-pre-wrap bg-white p-3 rounded border border-gray-200 min-h-[200px] max-h-[300px] overflow-y-auto">
+                            {{ clip.text or "No transcription available" }}
+                        </div>
+                    </div>
+                </div>
+            </div>
+            {% else %}
+            <div class="bg-white rounded-lg shadow p-6 text-center">
+                <p class="text-gray-500">No voice clips found in this folder.</p>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <script>
+        // Set video thumbnail
+        function setThumbnail(video) {
+            video.currentTime = 1; // Try to get a frame at 1 second
+            video.onloadeddata = null; // Remove the event listener after setting the thumbnail
+        }
+
+        // Play video when thumbnail is clicked
+        function playVideo(index, videoPath) {
+            const thumbnail = document.getElementById(`thumbnail-${index}`);
+            const videoPlayer = document.getElementById(`video-${index}`);
+            
+            if (videoPlayer.src !== videoPath) {
+                videoPlayer.src = `/files/${videoPath}`;
+            }
+            
+            thumbnail.classList.add('playing');
+            videoPlayer.classList.add('playing');
+            videoPlayer.play();
+        }
+
+        // Show thumbnail again when video ends
+        function videoEnded(index) {
+            const thumbnail = document.getElementById(`thumbnail-${index}`);
+            const videoPlayer = document.getElementById(`video-${index}`);
+            
+            thumbnail.classList.remove('playing');
+            videoPlayer.classList.remove('playing');
+            videoPlayer.currentTime = 0;
+        }
+
+        // Pause all other videos when one is playing
+        document.addEventListener('play', function(e) {
+            const videos = document.getElementsByTagName('video');
+            for (let i = 0; i < videos.length; i++) {
+                if (videos[i] !== e.target) {
+                    videos[i].pause();
+                }
+            }
+        }, true);
+    </script>
+</body>
+</html>
