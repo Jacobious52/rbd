@@ -1,0 +1,10 @@
+<div class="flex items-center mb-4">
+                        <div class="w-3 h-3 rounded-full mr-2 
+                            {{ 'bg-green-500' if status == 'completed' else 
+                               'bg-yellow-500' if status == 'running' else 
+                               'bg-red-500' if status == 'error' else 
+                               'bg-gray-500' }}"></div>
+                        <span class="font-medium">{{ status|title }}</span>
+                    </div>
+                    <p class="text-gray-700 mb-2">{{ message }}</p>
+                    <p class="text-sm text-gray-500">Last updated: {{ timestamp }}</p>

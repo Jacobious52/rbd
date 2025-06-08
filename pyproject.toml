@@ -5,12 +5,17 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "apscheduler>=3.11.0",
+    "fastapi>=0.115.12",
     "numpy>=2.2.6",
+    "python-dotenv>=1.1.0",
+    "python-multipart>=0.0.20",
     "scipy>=1.15.3",
     "silero-vad",
     "soundfile>=0.13.1",
     "torch>=2.7.1",
     "torchaudio>=2.7.1",
+    "uvicorn>=0.34.3",
 ]
 
 [tool.uv.sources]
