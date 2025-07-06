@@ -26,10 +26,10 @@
             transform: translateY(-5px);
         }
         
-        /* Solution 3: CSS-only initial hiding of 0-clip folders */
-        .initial-filter-hide .folder-row[data-clip-count="0"] {
+        /* Solution 3: CSS-only initial hiding - now handled by server-side filtering */
+        /* .initial-filter-hide .folder-row[data-clip-count="0"] {
             display: none !important;
-        }
+        } */
         
         /* Solution 5: Prevent any content flash during initial load */
         .folder-table {
@@ -136,7 +136,7 @@
                         <input type="checkbox" id="hideEmptyFolders" 
                                class="mr-2 h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
                                checked>
-                        Hide folders with 0 clips
+                        Hide processed folders with 0 clips
                     </label>
                     <button onclick="loadFolders()" 
                             class="text-sm text-blue-500 hover:underline">
@@ -223,14 +223,18 @@
                         }
                         
                         // Enhanced applyFolderFilter with smooth transitions
+                        // Note: This is now primarily handled by server-side filtering
                         function applyFolderFilter() {
                             const hideEmpty = document.getElementById('hideEmptyFolders').checked;
                             const folderRows = document.querySelectorAll('.folder-row');
                             
                             folderRows.forEach(row => {
                                 const clipCount = parseInt(row.getAttribute('data-clip-count') || '0');
+                                const isProcessed = row.querySelector('.bg-green-100') !== null; // Check if folder is processed
                                 
-                                if (hideEmpty && clipCount === 0) {
+                                // Only hide folders with 0 clips if they are already processed
+                                // Always show pending folders even if they have 0 clips
+                                if (hideEmpty && clipCount === 0 && isProcessed) {
                                     // Add transition class first
                                     row.classList.add('filtering-hide');
                                     // Then set display none after transition

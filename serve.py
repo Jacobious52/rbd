@@ -193,10 +193,12 @@ async def read_root(request: Request):
     """Render the admin dashboard."""
     folders = get_folder_status()
     
-    # Apply server-side filtering for initial page load (default to hiding empty folders)
+    # Apply server-side filtering for initial page load (default to hiding processed empty folders)
     hide_empty = request.query_params.get('hide_empty', 'true').lower() == 'true'
     if hide_empty:
-        folders = [folder for folder in folders if folder['video_count'] > 0]
+        # Only hide folders with 0 clips if they are already processed
+        # Always show pending folders even if they have 0 clips
+        folders = [folder for folder in folders if folder['video_count'] > 0 or not folder['processed']]
     
     # Add URL to each folder using relative path (same as API endpoint)
     for folder in folders:
@@ -279,7 +281,9 @@ async def list_folders(request: Request):
         # Apply server-side filtering based on query parameter
         hide_empty = request.query_params.get('hide_empty', 'true').lower() == 'true'
         if hide_empty:
-            folders = [folder for folder in folders if folder['video_count'] > 0]
+            # Only hide folders with 0 clips if they are already processed
+            # Always show pending folders even if they have 0 clips
+            folders = [folder for folder in folders if folder['video_count'] > 0 or not folder['processed']]
         
         # Add URL to each folder using relative path
         for folder in folders:
