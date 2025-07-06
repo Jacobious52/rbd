@@ -106,10 +106,19 @@ def get_folder_status() -> List[Dict[str, str]]:
     for item in sorted(BASE_DIR.iterdir(), reverse=True):
         if item.is_dir() and item.name.startswith("202"):  # Assuming folders start with year
             is_processed = (item / PROCESSED_MARKER).exists()
+            
+            # Count processed voice clips in the voice_clips subfolder
+            voice_clips_dir = item / "voice_clips"
+            if voice_clips_dir.exists() and voice_clips_dir.is_dir():
+                clip_count = len(list(voice_clips_dir.glob("*.mp4")))
+            else:
+                clip_count = 0
+            
             folders.append({
                 "name": item.name,
                 "path": str(item),
                 "processed": is_processed,
+                "video_count": clip_count,
                 "last_modified": datetime.fromtimestamp(item.stat().st_mtime).strftime('%Y-%m-%d %H:%M:%S')
             })
     return folders
@@ -183,6 +192,18 @@ scheduler.start()
 async def read_root(request: Request):
     """Render the admin dashboard."""
     folders = get_folder_status()
+    
+    # Apply server-side filtering for initial page load (default to hiding empty folders)
+    hide_empty = request.query_params.get('hide_empty', 'true').lower() == 'true'
+    if hide_empty:
+        folders = [folder for folder in folders if folder['video_count'] > 0]
+    
+    # Add URL to each folder using relative path (same as API endpoint)
+    for folder in folders:
+        folder_path = Path(folder['path'])
+        relative_path = folder_path.relative_to(BASE_DIR)
+        folder['url'] = f"/folder/{relative_path}"
+    
     return templates.TemplateResponse(
         "index.html",
         {
@@ -254,9 +275,17 @@ async def list_folders(request: Request):
     """Get list of folders and their status."""
     try:
         folders = get_folder_status()
-        # Add URL to each folder
+        
+        # Apply server-side filtering based on query parameter
+        hide_empty = request.query_params.get('hide_empty', 'true').lower() == 'true'
+        if hide_empty:
+            folders = [folder for folder in folders if folder['video_count'] > 0]
+        
+        # Add URL to each folder using relative path
         for folder in folders:
-            folder['url'] = f"/folder/{folder['path']}"
+            folder_path = Path(folder['path'])
+            relative_path = folder_path.relative_to(BASE_DIR)
+            folder['url'] = f"/folder/{relative_path}"
         return templates.TemplateResponse("folder_rows.html", {"request": request, "folders": folders})
     except Exception as e:
         return JSONResponse(

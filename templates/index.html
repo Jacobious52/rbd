@@ -5,6 +5,85 @@
     <title>Speech Extraction Service</title>
     <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
     <script src="https://unpkg.com/htmx.org@1.9.6"></script>
+    <style>
+        /* Solution 1: Prevent flash of unfiltered content */
+        .folder-container {
+            opacity: 0;
+            transition: opacity 0.3s ease-in-out;
+        }
+        
+        .folder-container.loaded {
+            opacity: 1;
+        }
+        
+        /* Solution 2: Smooth transitions for filtering */
+        .folder-row {
+            transition: opacity 0.2s ease-in-out, transform 0.2s ease-in-out;
+        }
+        
+        .folder-row.filtering-hide {
+            opacity: 0;
+            transform: translateY(-5px);
+        }
+        
+        /* Solution 3: CSS-only initial hiding of 0-clip folders */
+        .initial-filter-hide .folder-row[data-clip-count="0"] {
+            display: none !important;
+        }
+        
+        /* Solution 5: Prevent any content flash during initial load */
+        .folder-table {
+            visibility: hidden;
+        }
+        
+        .folder-table.ready {
+            visibility: visible;
+        }
+        
+        /* Loading states */
+        .loading-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(255, 255, 255, 0.9);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 10;
+            transition: opacity 0.2s ease-in-out;
+        }
+        
+        .loading-overlay.hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+        
+        .loading-spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f4f6;
+            border-radius: 50%;
+            border-top-color: #3b82f6;
+            animation: spin 1s ease-in-out infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+    <script>
+        // Solution 4: Immediate CSS class application before DOM content loads
+        (function() {
+            // Check if we should hide empty folders by default
+            const hideEmptyDefault = true;
+            if (hideEmptyDefault) {
+                document.documentElement.classList.add('initial-filter-hide');
+            }
+        })();
+    </script>
 </head>
 <body class="bg-gray-100">
     <div class="container mx-auto px-4 py-8">
@@ -67,50 +146,102 @@
             </div>
             
             <div class="overflow-x-auto">
-                <table class="min-w-full divide-y divide-gray-200">
-                    <thead>
-                        <tr>
-                            <th class="px-6 py-3 bg-gray-50 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Folder</th>
-                            <th class="px-6 py-3 bg-gray-50 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-                            <th class="px-6 py-3 bg-gray-50 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Clips</th>
-                            <th class="px-6 py-3 bg-gray-50 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last Modified</th>
-                        </tr>
-                    </thead>
-                    <tbody id="folders-list" class="bg-white divide-y divide-gray-200">
-                        {% include "folder_rows.html" %}
-                    </tbody>
+                <div class="relative min-h-[200px]">
+                    <div id="loading-overlay" class="loading-overlay hidden">
+                        <div class="flex items-center space-x-2">
+                            <div class="loading-spinner"></div>
+                            <span class="text-sm text-gray-600">Loading folders...</span>
+                        </div>
+                    </div>
+                    <table class="min-w-full divide-y divide-gray-200 folder-table" id="folders-table">
+                        <thead>
+                            <tr>
+                                <th class="px-6 py-3 bg-gray-50 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Folder</th>
+                                <th class="px-6 py-3 bg-gray-50 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                                <th class="px-6 py-3 bg-gray-50 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Clips</th>
+                                <th class="px-6 py-3 bg-gray-50 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last Modified</th>
+                            </tr>
+                        </thead>
+                        <tbody id="folders-list" class="bg-white divide-y divide-gray-200 folder-container">
+                            {% include "folder_rows.html" %}
+                        </tbody>
+                    </table>
+                </div>
                     <script>
                         // Initial load and periodic refresh of folders list
                         document.addEventListener('DOMContentLoaded', function() {
-                            // Apply initial filter to server-rendered content
-                            applyFolderFilter();
+                            const folderContainer = document.getElementById('folders-list');
+                            const loadingOverlay = document.getElementById('loading-overlay');
+                            const foldersTable = document.getElementById('folders-table');
                             
-                            // Initial load via HTMX
-                            loadFolders();
+                            // Show initial content smoothly after a brief delay
+                            setTimeout(function() {
+                                foldersTable.classList.add('ready');
+                                folderContainer.classList.add('loaded');
+                                // Remove the initial filter CSS class after content is visible
+                                document.documentElement.classList.remove('initial-filter-hide');
+                            }, 100);
                             
-                            // Set up periodic refresh (removed from global script to avoid conflicts)
+                            // Skip initial HTMX load - server-rendered content is already correct
+                            // Set up periodic refresh only
                             setInterval(loadFolders, 30000);
                             
                             // Add event listener for the checkbox
-                            document.getElementById('hideEmptyFolders').addEventListener('change', applyFolderFilter);
+                            document.getElementById('hideEmptyFolders').addEventListener('change', function() {
+                                // Immediately reload with new filter state
+                                loadFolders();
+                            });
                         });
                         
                         function loadFolders() {
-                            htmx.ajax('GET', '/api/folders', {target: '#folders-list', swap: 'innerHTML'}).then(function() {
-                                // Apply filter after HTMX content loads
-                                applyFolderFilter();
+                            const hideEmpty = document.getElementById('hideEmptyFolders').checked;
+                            const url = '/api/folders' + (hideEmpty ? '?hide_empty=true' : '?hide_empty=false');
+                            const folderContainer = document.getElementById('folders-list');
+                            const loadingOverlay = document.getElementById('loading-overlay');
+                            const foldersTable = document.getElementById('folders-table');
+                            
+                            // Show loading state
+                            folderContainer.classList.remove('loaded');
+                            loadingOverlay.classList.remove('hidden');
+                            
+                            htmx.ajax('GET', url, {target: '#folders-list', swap: 'innerHTML'}).then(function() {
+                                // Small delay to prevent flash, then show content
+                                setTimeout(function() {
+                                    foldersTable.classList.add('ready');
+                                    folderContainer.classList.add('loaded');
+                                    loadingOverlay.classList.add('hidden');
+                                }, 50);
+                            }).catch(function(error) {
+                                console.error('Error loading folders:', error);
+                                // Hide loading state even on error
+                                setTimeout(function() {
+                                    foldersTable.classList.add('ready');
+                                    folderContainer.classList.add('loaded');
+                                    loadingOverlay.classList.add('hidden');
+                                }, 50);
                             });
                         }
                         
+                        // Enhanced applyFolderFilter with smooth transitions
                         function applyFolderFilter() {
                             const hideEmpty = document.getElementById('hideEmptyFolders').checked;
                             const folderRows = document.querySelectorAll('.folder-row');
                             
                             folderRows.forEach(row => {
                                 const clipCount = parseInt(row.getAttribute('data-clip-count') || '0');
+                                
                                 if (hideEmpty && clipCount === 0) {
-                                    row.style.display = 'none';
+                                    // Add transition class first
+                                    row.classList.add('filtering-hide');
+                                    // Then set display none after transition
+                                    setTimeout(() => {
+                                        if (row.classList.contains('filtering-hide')) {
+                                            row.style.display = 'none';
+                                        }
+                                    }, 200);
                                 } else {
+                                    // Remove transition class and show element
+                                    row.classList.remove('filtering-hide');
                                     row.style.display = '';
                                 }
                             });

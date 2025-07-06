@@ -184,8 +184,8 @@ def extract_clips(video_path: Path, merged_timestamps: List[dict], output_dir: P
     print("Stage 4: Extracting individual voice clips...")
     clip_info: List[Tuple[Path, float]] = []
     for i, ts in enumerate(merged_timestamps):
-        start_sec = max(0, ts["start"] / 16000 - 1)
-        duration_sec = (ts["end"] - ts["start"]) / 16000 + 2
+        start_sec = max(0, ts["start"] / 16000 - 3)
+        duration_sec = (ts["end"] - ts["start"]) / 16000 + 6
         clip_file = output_dir / f"{video_path.stem}_clip_{i+1:03d}.mp4"
         subprocess.run(
             [
