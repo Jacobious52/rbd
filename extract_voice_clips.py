@@ -7,6 +7,7 @@ from typing import List, Tuple
 import shutil
 import datetime
 from datetime import timedelta
+from batch_llm_processor import BatchLLMProcessor
 
 def summarize_text(transcript_file: Path) -> str:
     """Use Ollama (gemma3:4b) to summarize transcript into a 2–4 word title."""
@@ -297,8 +298,11 @@ def process_video(video_path: Path) -> List[Tuple[Path, float]]:
         # Extract video clips
         clip_items = extract_clips(video_path, merged_timestamps, output_dir)
         
-        # Process each clip
+        # Process clips: first transcribe all, then batch process
         rankings = []
+        
+        # Step 1: Transcribe all clips using Whisper (keep individual)
+        clip_data = []  # List of (clip_path, start_sec, transcript_path)
         for clip_path, start_sec in clip_items:
             try:
                 # Track this clip's temporary files
@@ -316,54 +320,155 @@ def process_video(video_path: Path) -> List[Tuple[Path, float]]:
                 # Add transcript to temp files for cleanup
                 temp_files.append(transcript_path)
                 
-                # Correct the transcript
-                correct_transcript(transcript_path)
-                
-                # Generate a summary for the clip
-                summary = summarize_text(transcript_path)
-                
-                # Score the clip
-                time_score = compute_time_score(video_path, start_sec)
-                sleep_score = classify_sleep_talk(transcript_path)
-                final_score = time_score * sleep_score
-                
-                # Generate new base name for all files
-                new_base = output_dir / summary
-                
-                # Define new paths for all files
-                new_clip_path = new_base.with_suffix(clip_path.suffix)
-                new_transcript_path = new_base.with_suffix('.txt')
-                new_thumbnail_path = new_base.with_suffix('.png')
-                
-                # Extract thumbnail after we know the final filename
-                extract_thumbnail(clip_path, output_dir, "00:00:01")
-                
-                # Rename all files to use the summary
-                # First rename the thumbnail if it exists
-                thumbnail_path = clip_path.with_suffix('.png')
-                if thumbnail_path.exists():
-                    thumbnail_path.rename(new_thumbnail_path)
-                    # Remove from temp files since it's been renamed
-                    if thumbnail_path in temp_files:
-                        temp_files.remove(thumbnail_path)
-                
-                # Then rename the transcript and video
-                if transcript_path.exists():
-                    transcript_path.rename(new_transcript_path)
-                    if transcript_path in temp_files:
-                        temp_files.remove(transcript_path)
-                
-                if clip_path.exists():
-                    clip_path.rename(new_clip_path)
-                    if clip_path in temp_files:
-                        temp_files.remove(clip_path)
-                
-                # Add to rankings with the new path
-                rankings.append((new_clip_path, final_score))
+                # Store clip data for batch processing
+                clip_data.append((clip_path, start_sec, transcript_path))
                 
             except Exception as e:
-                print(f"Error processing clip {clip_path.name}: {e}")
+                print(f"Error transcribing clip {clip_path.name}: {e}")
                 continue
+        
+        if not clip_data:
+            print("No clips successfully transcribed")
+            return []
+        
+        # Step 2: Batch process all transcripts
+        print(f"Stage 5: Batch processing {len(clip_data)} transcripts...")
+        
+        # Initialize batch processor
+        batch_processor = BatchLLMProcessor()
+        
+        # Extract transcript files for batch processing
+        transcript_files = [transcript_path for _, _, transcript_path in clip_data]
+        
+        # Prepare fallback functions
+        fallback_functions = {
+            'correct': correct_transcript,
+            'summarize': summarize_text,
+            'classify': classify_sleep_talk
+        }
+        
+        try:
+            # Process all transcripts in batch
+            batch_results = batch_processor.process_with_fallback(
+                transcript_files, 
+                fallback_functions
+            )
+            
+            # Step 3: Apply batch results to clips
+            for i, (clip_path, start_sec, transcript_path) in enumerate(clip_data):
+                try:
+                    # Get batch result for this clip
+                    if i < len(batch_results):
+                        result = batch_results[i]
+                        
+                        # Write corrected transcript back to file
+                        with open(transcript_path, 'w', encoding='utf-8') as f:
+                            f.write(result['corrected_text'])
+                        
+                        # Use batch results for summary and scoring
+                        summary = result['summary']
+                        sleep_score = result['sleep_talk_score']
+                        
+                        print(f"[DEBUG] Batch result for clip {i+1}: summary='{summary}', sleep_score={sleep_score}")
+                        
+                    else:
+                        print(f"[WARNING] No batch result available for clip {i+1}, skipping")
+                        continue
+                    
+                    # Apply time-based scoring
+                    time_score = compute_time_score(video_path, start_sec)
+                    final_score = time_score * sleep_score
+                    
+                    # Generate new base name for all files
+                    new_base = output_dir / summary
+                    
+                    # Define new paths for all files
+                    new_clip_path = new_base.with_suffix(clip_path.suffix)
+                    new_transcript_path = new_base.with_suffix('.txt')
+                    new_thumbnail_path = new_base.with_suffix('.png')
+                    
+                    # Extract thumbnail after we know the final filename
+                    extract_thumbnail(clip_path, output_dir, "00:00:01")
+                    
+                    # Rename all files to use the summary
+                    # First rename the thumbnail if it exists
+                    thumbnail_path = clip_path.with_suffix('.png')
+                    if thumbnail_path.exists():
+                        thumbnail_path.rename(new_thumbnail_path)
+                        # Remove from temp files since it's been renamed
+                        if thumbnail_path in temp_files:
+                            temp_files.remove(thumbnail_path)
+                    
+                    # Then rename the transcript and video
+                    if transcript_path.exists():
+                        transcript_path.rename(new_transcript_path)
+                        if transcript_path in temp_files:
+                            temp_files.remove(transcript_path)
+                    
+                    if clip_path.exists():
+                        clip_path.rename(new_clip_path)
+                        if clip_path in temp_files:
+                            temp_files.remove(clip_path)
+                    
+                    # Add to rankings with the new path
+                    rankings.append((new_clip_path, final_score))
+                    
+                except Exception as e:
+                    print(f"Error processing clip {clip_path.name}: {e}")
+                    continue
+                    
+        except Exception as e:
+            print(f"Batch processing failed completely: {e}")
+            print("Falling back to individual processing for all clips...")
+            
+            # Fallback to original individual processing
+            for clip_path, start_sec, transcript_path in clip_data:
+                try:
+                    # Use original individual functions
+                    correct_transcript(transcript_path)
+                    summary = summarize_text(transcript_path)
+                    sleep_score = classify_sleep_talk(transcript_path)
+                    
+                    # Apply time-based scoring
+                    time_score = compute_time_score(video_path, start_sec)
+                    final_score = time_score * sleep_score
+                    
+                    # Generate new base name for all files
+                    new_base = output_dir / summary
+                    
+                    # Define new paths for all files
+                    new_clip_path = new_base.with_suffix(clip_path.suffix)
+                    new_transcript_path = new_base.with_suffix('.txt')
+                    new_thumbnail_path = new_base.with_suffix('.png')
+                    
+                    # Extract thumbnail after we know the final filename
+                    extract_thumbnail(clip_path, output_dir, "00:00:01")
+                    
+                    # Rename all files to use the summary
+                    # First rename the thumbnail if it exists
+                    thumbnail_path = clip_path.with_suffix('.png')
+                    if thumbnail_path.exists():
+                        thumbnail_path.rename(new_thumbnail_path)
+                        if thumbnail_path in temp_files:
+                            temp_files.remove(thumbnail_path)
+                    
+                    # Then rename the transcript and video
+                    if transcript_path.exists():
+                        transcript_path.rename(new_transcript_path)
+                        if transcript_path in temp_files:
+                            temp_files.remove(transcript_path)
+                    
+                    if clip_path.exists():
+                        clip_path.rename(new_clip_path)
+                        if clip_path in temp_files:
+                            temp_files.remove(clip_path)
+                    
+                    # Add to rankings with the new path
+                    rankings.append((new_clip_path, final_score))
+                    
+                except Exception as e:
+                    print(f"Individual fallback failed for clip {clip_path.name}: {e}")
+                    continue
                 
     finally:
         # Clean up all temporary files

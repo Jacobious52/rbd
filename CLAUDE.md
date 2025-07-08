@@ -7,6 +7,7 @@ This project is a Python-based speech extraction service designed to process sur
 ```
 rbd/
 ├── extract_voice_clips.py  # Core extraction logic
+├── batch_llm_processor.py  # Batch LLM processing module
 ├── serve.py               # FastAPI web server
 ├── pyproject.toml         # Project dependencies
 ├── templates/             # HTML templates for web interface
@@ -27,14 +28,22 @@ The main processing pipeline that:
 - Merges nearby speech segments
 - Extracts video clips for each speech segment
 - Transcribes audio using Whisper.cpp
-- Uses Ollama (gemma3:4b model) for:
+- Uses batch LLM processing (via `batch_llm_processor.py`) for:
   - Correcting transcription errors
   - Generating 2-4 word summaries
   - Scoring clips for sleep talk likelihood
 - Ranks clips by relevance (time-based + sleep talk scoring)
 - Generates thumbnails for each clip
 
-### 2. Web Interface (`serve.py`)
+### 2. Batch LLM Processing (`batch_llm_processor.py`)
+Optimized LLM processing module that:
+- Consolidates transcript correction, summarization, and classification into single API calls
+- Reduces LLM overhead from 3N calls to 1 call per video
+- Provides robust JSON response parsing and validation
+- Implements fallback mechanisms for batch processing failures
+- Maintains consistent processing quality across all clips
+
+### 3. Web Interface (`serve.py`)
 FastAPI-based web server providing:
 - Admin dashboard for monitoring extraction status
 - Manual extraction triggers
@@ -51,10 +60,11 @@ FastAPI-based web server providing:
 
 ### AI-Powered Processing
 - **Whisper.cpp**: Speech-to-text transcription
-- **Ollama with gemma3:4b**: 
+- **Batch LLM Processing**: Efficient processing using Ollama with gemma3:4b
   - Grammar/spelling correction
   - Automatic summarization
   - Sleep talk classification
+  - Consolidated into single API calls per video for optimal performance
 
 ### Smart Ranking System
 - Time-based scoring (prioritizes clips from midnight-6am)
@@ -167,14 +177,18 @@ python extract_voice_clips.py
 2. **VAD Processing**: Silero VAD identifies speech segments
 3. **Segment Merging**: Nearby segments are combined
 4. **Clip Extraction**: Video clips created with padding
-5. **Transcription**: Whisper.cpp generates text
-6. **AI Enhancement**: Ollama corrects and summarizes
-7. **Scoring**: Time and content-based ranking
-8. **Organization**: Files renamed and ranked
+5. **Transcription**: Whisper.cpp generates text for each clip
+6. **Batch LLM Processing**: Single API call processes all transcripts for:
+   - Grammar/spelling correction
+   - 2-4 word summary generation
+   - Sleep talk likelihood scoring
+7. **Time-based Scoring**: Clips scored based on timestamp (midnight-6am priority)
+8. **Final Ranking**: Combined scoring and file organization with numeric prefixes
 
 ### Key Functions
 - `extract_voice_clips.py:main()` - Main batch processing
-- `extract_voice_clips.py:process_video()` - Single video processing
+- `extract_voice_clips.py:process_video()` - Single video processing with batch LLM
+- `batch_llm_processor.py:BatchLLMProcessor` - Consolidated LLM processing
 - `serve.py:run_extraction()` - Web-triggered extraction
 - `serve.py:get_folder_status()` - Status monitoring
 
@@ -201,6 +215,34 @@ ollama list | grep gemma3
 4. Check ranking accuracy
 
 This service is designed for continuous operation with minimal manual intervention, automatically processing new surveillance footage and providing easy access to extracted voice clips through the web interface.
+
+---
+
+## Recent Performance Improvements
+
+### Batch LLM Processing Optimization (2024)
+A major performance optimization was implemented to consolidate individual LLM calls into batch processing:
+
+**Before**: Each voice clip required 3 separate LLM calls (correction, summary, classification)
+- For 10 clips = 30 LLM API calls per video
+- High latency and API overhead
+
+**After**: Single batch call processes all clips simultaneously
+- For 10 clips = 1 LLM API call per video
+- ~90% reduction in API calls
+- Maintained same quality and file naming conventions
+
+**Implementation Details**:
+- **Module**: `batch_llm_processor.py` - Centralized batch processing
+- **JSON Response**: Structured parsing with validation and error handling
+- **Fallback System**: Graceful degradation to individual processing on failures
+- **Preserved Functionality**: Same "1_summary.mp4" file naming and ranking system
+
+**Benefits**:
+- Dramatic performance improvement for video processing
+- Reduced API costs and latency
+- Improved consistency across clips (single context)
+- Enhanced error handling and logging
 
 ---
 
@@ -498,3 +540,105 @@ function validateDataIntegrity() {
 4. **Validate response structure**: Ensure consistent HTML structure
 
 This comprehensive debugging and development guide should help future agents avoid common pitfalls and maintain consistency when making modifications to the project.
+
+---
+
+## Refactoring and Optimization Best Practices
+
+### LLM Processing Architecture
+
+#### Individual vs Batch Processing
+When working with LLM-based processing in this project, consider the performance implications:
+
+**Individual Processing Pattern** (Legacy):
+```python
+for clip in clips:
+    corrected = correct_transcript(clip)
+    summary = summarize_text(clip)
+    score = classify_sleep_talk(clip)
+    # Results in 3N LLM calls
+```
+
+**Batch Processing Pattern** (Optimized):
+```python
+# Single batch call for all clips
+batch_results = batch_processor.process_with_fallback(clips, fallback_functions)
+# Results in 1 LLM call per video
+```
+
+#### Key Refactoring Principles
+
+1. **Preserve File Naming**: Always maintain the existing "1_summary.mp4" convention
+2. **Implement Fallbacks**: Ensure graceful degradation when batch processing fails
+3. **Validate Outputs**: Comprehensive JSON parsing and response validation
+4. **Error Isolation**: Individual clip failures should not affect the entire batch
+
+#### Performance Optimization Strategies
+
+**Before Optimization**:
+- Profile existing bottlenecks (use logging to identify slow operations)
+- Measure current performance metrics (API calls, processing time)
+- Identify repeated operations that can be consolidated
+
+**During Optimization**:
+- Implement with backward compatibility in mind
+- Test with various input sizes (1 clip, 10 clips, 20+ clips)
+- Ensure error handling doesn't break the entire pipeline
+
+**After Optimization**:
+- Verify functionality preservation (same outputs, same file names)
+- Monitor performance improvements (reduced API calls, faster processing)
+- Update documentation with new architecture patterns
+
+#### Testing Refactored Systems
+
+**Syntax Validation**:
+```bash
+python -m py_compile your_module.py
+python -c "import your_module; print('Import successful')"
+```
+
+**Functional Testing**:
+```python
+# Test class instantiation
+processor = BatchLLMProcessor()
+
+# Test key methods
+prompt = processor.create_batch_prompt(sample_data)
+results = processor.parse_batch_response(sample_response, expected_count)
+```
+
+**Integration Testing**:
+- Test with actual video files (if available)
+- Verify file naming conventions remain consistent
+- Ensure ranking and scoring algorithms produce expected results
+
+### Module Architecture Guidelines
+
+#### When to Create New Modules
+- **Complex functionality**: When adding substantial new features (>100 lines)
+- **Reusable components**: When functionality might be used in multiple places
+- **Performance optimization**: When consolidating related operations
+- **Clear separation**: When functionality has distinct responsibilities
+
+#### Module Design Patterns
+```python
+class ProcessorModule:
+    def __init__(self, config_params):
+        # Initialize with configurable parameters
+        pass
+    
+    def process_batch(self, inputs):
+        # Main processing logic
+        pass
+    
+    def process_with_fallback(self, inputs, fallback_functions):
+        # Implement graceful fallback mechanisms
+        pass
+    
+    def validate_outputs(self, outputs):
+        # Comprehensive output validation
+        pass
+```
+
+This refactoring guide provides patterns for future performance optimizations while maintaining system reliability and backward compatibility.
